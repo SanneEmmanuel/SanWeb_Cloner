@@ -2,7 +2,7 @@
 /**
  * Plugin Name: SanWeb Cloner
  * Description: Clones content from a public webpage into a WordPress page. For academic use only.
- * Version: 1.2
+ * Version: 1.3
  * Author: Dr. Sanne Karibo
  */
 
@@ -45,7 +45,8 @@ function sanweb_cloner_page() {
             <label for="sanweb_url"><strong>Enter the URL of the webpage to clone:</strong></label><br><br>
             <input type="url" name="sanweb_url" id="sanweb_url" required style="width: 50%;" placeholder="https://example.com" /><br><br>
             <label><input type="checkbox" name="save_images" value="1"> Save images into WordPress</label><br>
-            <label><input type="checkbox" name="link_images" value="1"> Use image link in site</label><br><br>
+            <label><input type="checkbox" name="link_images" value="1"> Use image link in site</label><br>
+            <label><input type="checkbox" name="elementor_editable" value="1" checked> Elementor editable</label><br><br>
             <?php submit_button('Clone and Create Page'); ?>
         </form>
         <?php
@@ -54,6 +55,7 @@ function sanweb_cloner_page() {
             $url = esc_url_raw($_POST['sanweb_url']);
             $save_images = isset($_POST['save_images']);
             $link_images = isset($_POST['link_images']);
+            $elementor_editable = isset($_POST['elementor_editable']);
 
             $response = wp_remote_get($url);
             if (is_wp_error($response)) {
@@ -83,6 +85,13 @@ function sanweb_cloner_page() {
             ]);
 
             if ($new_page_id) {
+                // Enable Elementor editing
+                if ($elementor_editable) {
+                    update_post_meta($new_page_id, '_elementor_edit_mode', 'builder');
+                    update_post_meta($new_page_id, '_elementor_template_type', 'wp-page');
+                    update_post_meta($new_page_id, '_elementor_page_settings', []);
+                }
+
                 echo '<div class="notice notice-success" style="padding: 20px; font-size: 16px; background-color: #d7fddc; border-left: 5px solid #2ecc71;"><span style="font-size: 20px;">✅</span> <strong>Site Saved!</strong> Your cloned page is created as a draft. <a href="' . esc_url(get_edit_post_link($new_page_id)) . '">Edit Page</a></div>';
             } else {
                 echo '<div class="notice notice-error"><p>Failed to create the page.</p></div>';
@@ -93,32 +102,65 @@ function sanweb_cloner_page() {
     echo '</div>';
 }
 
-// Extract content with optional image handling
+// Wrap content blocks in Elementor-compatible layout
+function elementor_wrap_block($html) {
+    return '
+    <div class="elementor-section elementor-top-section" data-element_type="section">
+        <div class="elementor-container elementor-column-gap-default">
+            <div class="elementor-column elementor-col-100" data-element_type="column">
+                <div class="elementor-widget-wrap">
+                    <div class="elementor-element elementor-widget elementor-widget-text-editor" data-element_type="widget">
+                        <div class="elementor-widget-container">
+                            ' . $html . '
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>';
+}
+
+// Extract content with Elementor formatting
 function sanweb_extract_content($node, $save_images, $link_images) {
     $content = '';
+
     foreach ($node->childNodes as $child) {
         if ($child->nodeType === XML_TEXT_NODE) {
-            $content .= $child->textContent;
+            $text = trim($child->textContent);
+            if (!empty($text)) {
+                $content .= elementor_wrap_block('<p>' . esc_html($text) . '</p>');
+            }
         } elseif ($child->nodeType === XML_ELEMENT_NODE) {
             $tag = strtolower($child->nodeName);
-            if (in_array($tag, ['h1', 'h2', 'h3', 'h4', 'p', 'li', 'strong', 'em'])) {
-                $content .= '<' . $tag . '>' . sanweb_extract_content($child, $save_images, $link_images) . '</' . $tag . '>';
+            $inner = sanweb_extract_content($child, $save_images, $link_images);
+
+            if (in_array($tag, ['h1', 'h2', 'h3', 'h4', 'p'])) {
+                $block = "<{$tag}>{$inner}</{$tag}>";
+                $content .= elementor_wrap_block($block);
             } elseif (in_array($tag, ['ul', 'ol'])) {
-                $content .= '<' . $tag . '>' . sanweb_extract_content($child, $save_images, $link_images) . '</' . $tag . '>';
+                $content .= elementor_wrap_block("<{$tag}>{$inner}</{$tag}>");
+            } elseif ($tag === 'li') {
+                $content .= "<li>{$inner}</li>";
+            } elseif ($tag === 'strong' || $tag === 'em') {
+                $content .= "<{$tag}>{$inner}</{$tag}>";
             } elseif ($tag === 'img') {
                 $src = $child->getAttribute('src');
                 if ($save_images && $src) {
                     $media_id = media_sideload_image($src, 0, null, 'src');
                     if (!is_wp_error($media_id)) {
-                        $content .= '<img src="' . esc_url($media_id) . '" alt="" />';
+                        $img_tag = '<img src="' . esc_url($media_id) . '" alt="" />';
+                        $content .= elementor_wrap_block($img_tag);
                     }
                 } elseif ($link_images && $src) {
-                    $content .= '<img src="' . esc_url($src) . '" alt="" />';
+                    $img_tag = '<img src="' . esc_url($src) . '" alt="" />';
+                    $content .= elementor_wrap_block($img_tag);
                 }
             } else {
-                $content .= sanweb_extract_content($child, $save_images, $link_images);
+                // Default fallback for unknown tags
+                $content .= $inner;
             }
         }
     }
+
     return $content;
 }
